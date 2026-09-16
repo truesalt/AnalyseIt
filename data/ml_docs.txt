@@ -1,0 +1,172 @@
+﻿# AnalyseIt Knowledge Base
+# Machine Learning data preparation best practices.
+# Each "## " heading starts a new retrievable section. rag_engine.py chunks on
+# these boundaries, so every section should stand on its own without context
+# from its neighbours.
+
+
+## Handling missing values in numeric columns
+
+Missing numeric data is rarely missing at random, and the imputation strategy should reflect why the values are absent. Mean imputation is the weakest default: it pulls every imputed row toward the centre, shrinks variance, and distorts correlations. Median imputation is strictly safer for skewed distributions because the median is insensitive to the extreme values that drag the mean around.
+
+The practical rule of thumb is driven by the missing percentage. Below 5 percent, simple median imputation with SimpleImputer(strategy="median") is almost always adequate. Between 5 and 30 percent, the missingness itself is probably informative: impute, but also add a binary indicator column recording which rows were missing, so the model can learn from the absence. Above 30 percent, imputation fabricates the majority of the column and you should seriously consider dropping it entirely, unless domain knowledge says the column is critical.
+
+Never compute imputation statistics over the whole dataset before splitting. The median must be learned from the training fold only and then applied to validation and test folds, otherwise test-set information leaks into training. Use sklearn.impute.SimpleImputer inside a Pipeline so this happens correctly by construction.
+
+For a stronger approach, KNNImputer and IterativeImputer estimate missing values from the other columns, which preserves relationships between features but costs considerably more compute and can overfit on small datasets.
+
+
+## Handling missing values in categorical columns
+
+Categorical missingness should almost never be filled with the mode. Substituting the most frequent category inflates that level's frequency, biases any encoding derived from it, and destroys the signal that the value was unknown in the first place.
+
+The preferred treatment is to make missingness explicit: fill with a literal sentinel string such as "Missing" or "Unknown" and treat it as a legitimate category. This is a one-line operation with df[col] = df[col].fillna("Missing"), and it lets one-hot or target encoding carry the "we did not know" signal into the model. Tree-based models in particular can split on that level and extract real predictive value from it.
+
+Use SimpleImputer(strategy="constant", fill_value="Missing") inside a Pipeline so the same behaviour applies at inference time. Mode imputation with strategy="most_frequent" is only defensible when the missing rate is very low, under roughly 5 percent, and you have domain reason to believe the absence is a recording error rather than a meaningful state.
+
+If a categorical column exceeds 50 percent missing, dropping it usually beats any imputation, because the imputed sentinel would dominate the column and the remaining real levels would be too sparse to estimate reliably.
+
+
+## Imputing a small number of missing values
+
+When a column has only a handful of missing entries, typically under 5 percent of rows, the choice of imputation method barely affects downstream model performance. Do not over-engineer this case. Median for numeric columns and a "Missing" sentinel for categorical columns are sufficient and defensible.
+
+The one decision that still matters is whether to impute or to drop the affected rows. Dropping rows with df.dropna(subset=[col]) is acceptable when the dataset is large and the missing rows are few, because you lose almost no information. It becomes dangerous when several columns each have a small amount of missingness in different rows: dropping on all of them compounds, and a dataset where six columns are each 3 percent missing can lose close to 20 percent of its rows. Always check df.dropna().shape against df.shape before committing to row deletion.
+
+Prefer column-wise imputation over row deletion when the model will need to score records at inference time that may also have missing values. A pipeline that drops rows cannot produce a prediction for an incomplete record, whereas one that imputes can.
+
+
+## Handling columns that are completely empty
+
+A column that is 100 percent missing carries zero information and must be removed. It cannot be imputed, because there is no observed value to learn a statistic from, and any fill value you invent is a constant, which is equally useless.
+
+Drop these columns immediately with df = df.drop(columns=[col]) as the first step of any cleaning pipeline, before profiling the remainder. Leaving them in place causes downstream failures: SimpleImputer raises or silently produces an all-constant column, correlation matrices emit NaN, and one-hot encoders generate a meaningless single dummy.
+
+Investigate the cause before discarding permanently. A fully empty column often indicates a broken join, a renamed source field, or an extraction bug in the upstream pipeline. The data may be recoverable at source, which is far more valuable than dropping the column. Record the dropped column names in your cleaning log so the loss is visible and auditable rather than silent.
+
+
+## Zero variance and constant features
+
+A constant feature takes exactly one distinct value across every row. It has zero variance, contributes nothing to any model's decision boundary, and should be dropped. Linear models assign it an arbitrary coefficient that is absorbed into the intercept, tree models never select it for a split, and distance metrics are unaffected by it. It is pure overhead.
+
+Detect these with df.nunique() and drop where the count is 1, or use sklearn.feature_selection.VarianceThreshold(threshold=0.0) for a pipeline-compatible version. Remember that VarianceThreshold operates on numeric input, so categorical constants must be handled separately or after encoding.
+
+Quasi-constant features deserve the same scrutiny. A column where 99 percent of rows share a single value has almost no discriminative power, and the rare minority values are too infrequent to estimate reliably. Setting VarianceThreshold(threshold=0.01) removes these as well. Be cautious in one specific case: for a rare-event problem such as fraud detection, a quasi-constant column may be precisely the rare signal you are trying to capture, so check the relationship with the target before dropping.
+
+
+## Transforming skewed numeric features
+
+Skewness measures distributional asymmetry. A value near zero indicates symmetry; magnitude above 1 indicates substantial skew, and above 2 indicates severe skew. Right-skewed data with a long upper tail is extremely common in real datasets: income, price, population, counts, and durations all behave this way.
+
+Skew matters because linear and distance-based models assume roughly symmetric, comparably scaled inputs. A long tail lets a few extreme rows dominate the loss function, and gradient descent converges slowly along that axis. Tree-based models such as random forests and gradient boosting are invariant to monotonic transforms and do not require this correction.
+
+For strictly positive data, np.log1p is the standard fix, using log(1+x) so that zero values are handled safely. For data containing zeros or negatives, log is undefined, and you should use sklearn.preprocessing.PowerTransformer(method="yeo-johnson"), which is defined over the entire real line. The Box-Cox variant is more powerful but requires strictly positive input.
+
+Always verify the transform worked by recomputing skewness afterwards. Fit the transformer on training data only, and store it so the identical transform is applied at inference.
+
+
+## Detecting and treating outliers
+
+The interquartile range method defines outliers as points below Q1 minus 1.5 times IQR or above Q3 plus 1.5 times IQR, where IQR equals Q3 minus Q1. It makes no distributional assumption and is robust, since quartiles are themselves resistant to extreme values. The Z-score method flags points more than three standard deviations from the mean, but it is unreliable on skewed data because the outliers inflate the very standard deviation used to detect them.
+
+Critically, an outlier is not automatically an error. Distinguish three cases. Data entry errors, such as an age of 999, should be corrected or removed. Genuine extreme values, such as a legitimate high-net-worth customer, carry real signal and must be retained. Values from a different population entirely, such as internal test accounts, indicate the dataset needs filtering upstream.
+
+Deleting rows is the most destructive option and should be a last resort, because it shrinks the dataset and biases it toward the centre. Prefer winsorization, clipping values to the IQR bounds with df[col].clip(lower, upper), which retains every row while limiting leverage. Alternatively, apply a transform that compresses the tail, or switch to RobustScaler, which centres on the median and scales by the IQR so that extreme values barely influence the result.
+
+
+## Feature scaling: standardization versus normalization
+
+Scaling is required whenever a model measures distance or optimizes by gradient descent. K-nearest neighbours, K-means, SVMs, PCA, and regularized linear models are all scale-sensitive: a feature measured in the tens of thousands will dominate one measured in single digits purely because of its units. Tree-based models split each feature independently and need no scaling at all.
+
+StandardScaler subtracts the mean and divides by the standard deviation, producing zero mean and unit variance. It is the default choice, works well with normally distributed data, and preserves outliers as genuinely large values. MinMaxScaler maps to a fixed range, usually zero to one, which suits neural network inputs and image data, but a single extreme value compresses every other observation into a narrow band. RobustScaler centres on the median and scales by the IQR, making it the right pick when outliers are present and you intend to keep them.
+
+The leakage rule is absolute: call fit_transform on the training set and transform on validation and test sets. Never fit the scaler on the full dataset. Wrapping the scaler in a Pipeline with the estimator makes this correct automatically under cross-validation.
+
+
+## Converting text columns to numeric dtypes
+
+A numeric column stored with object dtype is one of the most common defects in real CSV data. It usually arises from currency symbols, thousands separators, percent signs, stray whitespace, or sentinel strings such as "N/A", "-", or "unknown" appearing in a small fraction of rows. Pandas falls back to object dtype for the entire column when even one value fails to parse.
+
+The consequences are severe and often silent: aggregations concatenate strings instead of summing, sorting is lexicographic so "10" precedes "9", correlation and describe silently skip the column, and models either error out or treat thousands of numeric values as categorical levels.
+
+Clean with pd.to_numeric(df[col], errors="coerce"), which converts the parseable values and turns everything else into NaN. Strip contaminating characters first using df[col].astype(str).str.replace(r"[^0-9.\-]", "", regex=True). Always inspect how many values became NaN after coercion: a small count means you removed genuine junk, whereas a large count means the column was not really numeric and your regex destroyed real data. After conversion, apply the missing value strategy appropriate to the resulting NaN count.
+
+
+## Parsing datetime columns and extracting features
+
+A datetime stored as a string is useless to a model. Left alone, it is treated as a high-cardinality categorical column where every row is a distinct level, which produces either a useless one-hot explosion or an arbitrary ordinal encoding with no temporal meaning.
+
+Parse with pd.to_datetime(df[col], errors="coerce"), then verify the NaT count to confirm the format was understood. Pass an explicit format string when you know it, both for correctness and for a large speed improvement on big datasets. Beware the ambiguity between day-first and month-first ordering, which silently corrupts dates where both components are 12 or below; set dayfirst explicitly when the source is non-US.
+
+The raw timestamp is still not a good feature. Extract components that carry signal: year, month, day of week, hour, quarter, and boolean flags such as is_weekend or is_month_end. For cyclical components like month and hour, encode as sine and cosine pairs so that December sits adjacent to January rather than eleven units away. Where a reference point exists, compute elapsed durations such as days since signup, which are usually far more predictive than the absolute date. Finally, drop the original datetime column once features are extracted.
+
+
+## Cleaning columns with mixed data types
+
+A column holding multiple Python types, integers alongside strings alongside booleans, signals an upstream data quality failure. Pandas stores it as object dtype, and every downstream operation becomes unpredictable: comparison operators raise TypeError, sorting fails, groupby produces separate keys for 1 and "1", and encoders treat the integer and the string as unrelated levels.
+
+Diagnose first by inspecting the distribution of types with df[col].map(type).value_counts(). This reveals whether you have a dominant type with a few contaminants, which is usually fixable, or a genuine mixture of unrelated concepts, which usually means the column should be split into several.
+
+The fix depends on intent. If the column is conceptually numeric, coerce with pd.to_numeric(errors="coerce") and handle the resulting NaN values. If it is conceptually categorical, normalize everything to string with .astype(str) and then standardize the representation by lowercasing and stripping whitespace, since "Yes", "yes", and " yes " are three distinct levels otherwise. Resolve mixed types before any encoding step, because encoders will otherwise silently produce duplicate columns for what is really one category.
+
+
+## Dropping identifier columns before modeling
+
+A column whose value is unique for every row, such as a customer ID, transaction ID, UUID, or row index, must be excluded from the feature set. It is a label for the row, not a property of it, and it has no predictive relationship with the target that can generalize to unseen records.
+
+Including one is actively harmful. High-capacity models can memorize the mapping from ID to target, producing near-perfect training accuracy that collapses entirely on new data, which is a textbook leakage failure. One-hot encoding an ID column generates as many dummy columns as there are rows, exhausting memory instantly.
+
+Detect these by comparing df[col].nunique() to len(df); a ratio near 1.0 on a non-numeric or integer column is the signature. Retain the identifier outside the feature matrix so predictions can be joined back to source records, but keep it out of X.
+
+Exercise judgement on sequential integer IDs. If records were assigned IDs in chronological order, the ID encodes time and may appear predictive, but relying on it is leakage that will fail in production. Extract the underlying timestamp instead.
+
+
+## Encoding low cardinality categorical features
+
+One-hot encoding creates a binary indicator column per level and is the correct default for nominal categories with no inherent order, such as city or product type. It makes no ordering assumption, which matters because a linear model given an arbitrary integer mapping will infer that category 3 lies between 2 and 4. Use sklearn.preprocessing.OneHotEncoder with handle_unknown="ignore" so that categories unseen during training do not raise at inference time.
+
+Ordinal encoding assigns an integer per level and is correct only when a genuine order exists, such as low, medium, high or a size scale. Specify the category order explicitly with OrdinalEncoder(categories=[[...]]) rather than accepting the default alphabetical ordering, which is almost never the meaningful one.
+
+Cardinality governs the choice. Up to roughly 10 to 15 levels, one-hot is comfortable. Beyond about 50 levels, the resulting sparsity degrades most models and you should switch to a target or frequency encoding. For binary categories, a single 0/1 column is sufficient and drop="first" avoids the redundant second column, which also removes the perfect multicollinearity that destabilizes linear model coefficients.
+
+
+## Encoding high cardinality categorical features
+
+When a categorical column has hundreds or thousands of levels, such as postcode, product SKU, or free-text city, one-hot encoding is not viable. It produces a column per level, explodes memory, and leaves each dummy so sparse that no model can estimate a reliable coefficient for it.
+
+Frequency encoding replaces each level with its count or proportion in the training data. It is trivial to compute, cannot leak the target, and works well when rarity itself is informative. Its weakness is that two unrelated levels sharing a frequency collapse to the same value.
+
+Target encoding replaces each level with the mean target value for that level. It is far more powerful and keeps dimensionality at one column, but it leaks the target directly and will overfit badly unless computed out-of-fold. Always use cross-fold target encoding or sklearn.preprocessing.TargetEncoder, which handles this internally, and apply smoothing so that levels with few observations shrink toward the global mean.
+
+A simpler alternative that often suffices: retain the top N most frequent levels and map the remainder to a single "Other" bucket, then one-hot the result. This caps dimensionality while preserving the levels that carry most of the data.
+
+
+## Handling imbalanced and near constant categorical features
+
+A categorical column where one level accounts for 95 percent or more of rows provides very little discriminative power. The minority levels are too sparse for a model to estimate reliable effects, and most algorithms will effectively ignore the column entirely.
+
+Assess it against the target before acting. If the rare level correlates strongly with the outcome, as it often does in fraud, churn, or defect detection, the column is valuable precisely because it is rare and must be retained. If the rare levels show no relationship with the target, the column is noise and can be dropped.
+
+When retaining it, simplify the representation. Collapse to a binary indicator distinguishing the dominant level from everything else, which preserves the signal while removing sparse and unreliable dummy columns. Group the minority levels into a single "Other" category when they share a meaningful interpretation.
+
+Do not confuse this with target imbalance, which is a different problem requiring different tools such as class weighting, stratified splitting, or resampling. A near-constant feature is addressed by encoding choices; a near-constant target is addressed by the training procedure and by choosing evaluation metrics such as precision-recall AUC over plain accuracy.
+
+
+## Detecting and removing duplicate rows
+
+Duplicate rows inflate apparent sample size, bias models toward the repeated records, and corrupt evaluation catastrophically when the same row lands in both the training and the test split. That last failure produces optimistic validation scores that do not survive deployment, and it is one of the most common causes of a model that looks excellent offline and fails in production.
+
+Detect with df.duplicated().sum() for exact matches and remove with df.drop_duplicates(). Deduplicate before splitting into train and test, never after, or identical rows will already have been separated across the two sets.
+
+Exact duplicates are the easy case. Partial duplicates, where the same real-world entity appears with slight variations in a few fields, are far more common and harder to catch. Use subset= with the columns that should jointly identify a record, for example df.drop_duplicates(subset=["customer_id", "date"], keep="last"), and choose keep deliberately: "first", "last", or False to drop every copy.
+
+Confirm duplicates are genuinely erroneous before deleting. In transactional or event data, two identical rows may represent two real events that legitimately share every recorded attribute, and removing them destroys real information.
+
+
+## Order of operations in a cleaning pipeline
+
+Cleaning steps interact, and running them in the wrong order produces wrong results. A workable default sequence follows.
+
+First, drop fully empty columns and constant columns, since they cannot inform any later decision. Second, remove duplicate rows, because duplicates distort every statistic computed afterward and can mask an identifier column by making a unique key appear non-unique. Third, fix dtypes: coerce text-stored numerics, parse datetimes, and resolve mixed-type columns, because the correct missing value and outlier strategy depends on knowing the true type. Fourth, handle missing values, now that dtypes are correct and coercion has surfaced any additional NaN values. Fifth, treat outliers, which requires complete numeric columns to compute quartiles reliably. Sixth, apply transforms for skew. Seventh, encode categorical features. Eighth, scale numeric features, last because encoding introduces new numeric columns that also need scaling.
+
+Split into train and test before any step that learns a statistic from the data. Imputation values, scaler parameters, encoder category lists, and target encodings must all be fitted on the training fold alone. The reliable way to enforce this is sklearn.pipeline.Pipeline combined with ColumnTransformer, which applies the correct per-column treatment and refits cleanly inside every cross-validation fold.

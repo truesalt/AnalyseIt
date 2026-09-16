@@ -1,0 +1,17 @@
+# Streamlit configuration for AnalyseIt.
+#
+# The upload cap is a memory guard, not a preference. Streamlit Community Cloud
+# allocates 1 GB per app; ChromaDB plus the embedding model hold ~600 MB of it,
+# so a large upload parsed into a DataFrame would OOM the container.
+# Streamlit's own default here is 200 MB, which this deliberately overrides.
+
+[server]
+maxUploadSize = 50
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#4F8BF9"

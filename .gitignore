@@ -1,0 +1,17 @@
+# Secrets - never commit these. .env.example is the template that IS committed.
+.env
+.streamlit/secrets.toml
+
+# Vector index - rebuilt from data/ml_docs.txt on first run
+.chroma/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# OS
+Thumbs.db
+.DS_Store

@@ -1,0 +1,29 @@
+# AnalyseIt - Doc-Augmented Automated EDA & Feature Engineering Agent
+# Python 3.10+ (tested on 3.12.3)
+#
+# LOCAL DEVELOPMENT. Install:  pip install -r requirements.txt
+# For deployment use requirements-deploy.txt, which drops torch and
+# sentence-transformers (~2 GB smaller) and runs the identical model via ONNX.
+#
+# On a machine without a CUDA GPU, install the CPU-only torch build first to
+# avoid a ~2.5 GB CUDA download:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# --- Frontend ---
+streamlit>=1.38.0
+
+# --- Data processing / statistical engine ---
+pandas>=2.2.0
+numpy>=1.26.0
+scipy>=1.13.0
+scikit-learn>=1.5.0
+
+# --- Vector database + embeddings (RAG) ---
+chromadb>=0.5.5
+sentence-transformers>=3.0.0      # pulls in torch + transformers (~2 GB on first install)
+
+# --- LLM + strictly typed outputs ---
+pydantic>=2.8.0
+openai>=1.40.0                    # gpt-4o-mini path
+anthropic>=0.40.0                 # Claude path
+python-dotenv>=1.0.1              # loads OPENAI_API_KEY / ANTHROPIC_API_KEY from .env
