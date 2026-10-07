@@ -66,7 +66,8 @@ class LLMError(RuntimeError):
 
 # Sampling parameters (temperature/top_p/top_k) were removed on Claude 4.6 and
 # later - sending temperature to those models returns a 400. Haiku 4.5 and
-# earlier still accept it. Keeps a model swap from breaking the call.
+# earlier still accept it, but only via extra_body (see _call_anthropic).
+# Keeps a model swap from breaking the call.
 _NO_TEMPERATURE_PATTERNS = (
     "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5",
     "claude-sonnet-4-6", "claude-sonnet-5", "claude-fable", "claude-mythos",
@@ -280,7 +281,12 @@ def _call_anthropic(system: str, user: str, config: LLMConfig) -> CodeSuggestion
     client = anthropic.Anthropic(api_key=config.resolve_key())
     kwargs: dict[str, Any] = dict(config.extra)
     if _supports_temperature(config.provider, config.model or ""):
-        kwargs["temperature"] = config.temperature
+        # anthropic 1.x removed temperature from the messages.* signatures, so
+        # passing it by name is a TypeError regardless of model. The models that
+        # still accept it take it through the request body instead.
+        extra_body = dict(kwargs.pop("extra_body", {}))
+        extra_body.setdefault("temperature", config.temperature)
+        kwargs["extra_body"] = extra_body
     try:
         response = client.messages.parse(
             model=config.model,
