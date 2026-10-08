@@ -43,7 +43,7 @@ def test_switching_provider_switches_model_and_key(monkeypatch):
     at = start()
     at.sidebar.radio[0].set_value("openai").run()
     assert at.sidebar.text_input[0].value == "gpt-4o-mini"
-    assert any("OPENAI_API_KEY" in w.value for w in at.sidebar.warning)
+    assert any("OPENAI_API_KEY" in i.value for i in at.sidebar.info)
 
 
 def test_sidebar_starts_on_the_provider_that_has_a_key(monkeypatch):
@@ -52,6 +52,16 @@ def test_sidebar_starts_on_the_provider_that_has_a_key(monkeypatch):
     assert at.sidebar.radio[0].value == "openai"
     assert at.sidebar.text_input[0].value == "gpt-4o-mini"
     assert any("shared key" in c.value for c in at.sidebar.caption)
+
+
+def test_gemini_setup_is_labelled_and_preselected(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
+    monkeypatch.setenv("ANALYSEIT_LLM_MODEL", "gemini-3.5-flash")
+    at = start()
+    assert at.sidebar.radio[0].value == "openai"
+    assert "Gemini (OpenAI-compatible)" in at.sidebar.radio[0].options
+    assert at.sidebar.text_input[0].value == "gemini-3.5-flash"
 
 
 def test_upload_renders_issues_and_the_redacted_payload():

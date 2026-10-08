@@ -28,6 +28,7 @@ from llm_agent import (
     build_script,
     default_config,
     generate_plan,
+    openai_service_name,
     select_issues,
     unknown_columns,
 )
@@ -139,16 +140,18 @@ with st.sidebar:
     # keys into the environment, which is all default_config() looks at.
     read_secret("ANTHROPIC_API_KEY")
     defaults = default_config()
+    # OPENAI_BASE_URL can point the OpenAI option at Gemini or another
+    # OpenAI-compatible API; label it with the service actually used.
+    service = openai_service_name()
+    openai_label = "OpenAI" if service == "OpenAI" else f"{service} (OpenAI-compatible)"
     provider = st.radio(
         "LLM provider",
         options=list(DEFAULT_MODELS.keys()),
         index=list(DEFAULT_MODELS).index(defaults.provider),
-        format_func=lambda p: {"anthropic": "Anthropic (Claude)", "openai": "OpenAI"}[p],
+        format_func=lambda p: {"anthropic": "Anthropic (Claude)", "openai": openai_label}[p],
         horizontal=True,
     )
-    model = st.text_input(
-        "Model", value=defaults.model if provider == defaults.provider else DEFAULT_MODELS[provider]
-    )
+    model = st.text_input("Model", value=default_config(provider).model)
 
     env_var = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
     host_key = read_secret(env_var)
@@ -160,7 +163,9 @@ with st.sidebar:
             "Used for this session only - never stored or logged. Leave blank to use "
             "the app's own key if one is configured."
         ),
-        placeholder="sk-..." if provider == "openai" else "sk-ant-...",
+        placeholder="sk-ant-..." if provider == "anthropic" else (
+            "sk-..." if service == "OpenAI" else f"{service} API key"
+        ),
     )
 
     api_key = user_key or host_key
@@ -169,7 +174,11 @@ with st.sidebar:
     elif host_key:
         st.caption("Using the app's shared key.")
     else:
-        st.warning(f"No key available. Set {env_var} or paste one above.")
+        # Not an error: profiling needs no key, only plan generation does.
+        st.info(
+            f"No API key set. Profiling works without one; to generate a cleaning "
+            f"plan, paste a key above or set {env_var}."
+        )
 
     n_issues = st.slider(
         "Issues to analyse",

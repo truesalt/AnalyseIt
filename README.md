@@ -97,11 +97,21 @@ Built for Streamlit Community Cloud's free tier (1 GB RAM, 1 CPU).
 
 1. Push the repo to GitHub.
 2. Create an app at [share.streamlit.io](https://share.streamlit.io): your repo, branch `main`, file `app.py`.
-3. Optionally, add a shared key under **Settings → Secrets** (one line, TOML):
+3. Optionally, add a shared key under **Settings → Secrets** (TOML):
 
    ```toml
    OPENAI_API_KEY = "sk-..."        # or ANTHROPIC_API_KEY = "sk-ant-..."
    ```
+
+   Or, for free, Google Gemini through its OpenAI-compatible API (key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey)):
+
+   ```toml
+   OPENAI_API_KEY = "your-gemini-key"
+   OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+   ANALYSEIT_LLM_MODEL = "gemini-3.5-flash"
+   ```
+
+   Any other OpenAI-compatible API works the same way: `OPENAI_BASE_URL` points the OpenAI option at it, and the sidebar names the service. Google may use free-tier content to improve its products; AnalyseIt only ever sends aggregate statistics.
 
 Community Cloud only ever installs a file named `requirements.txt`, which is why that file is the slim runtime set: no PyTorch or sentence-transformers, roughly 2 GB less to build. ChromaDB bundles the same `all-MiniLM-L6-v2` model as ONNX, and `rag_engine.py` switches to it automatically — no code change. The two backends agree to within 2e-7 per vector component and give identical retrieval rankings (see below).
 
@@ -136,14 +146,16 @@ Every number below is reproduced by a script in this repo.
 | Chunk integrity | 36 chunks, 0 missing headings, 0 mid-sentence cuts | `python eval_retrieval.py` |
 | Backend equivalence | sentence-transformers vs ONNX: max component difference 1.9e-7, identical rankings (not byte-identical) | `python eval_retrieval.py --compare` |
 | Memory | peak RSS ~540–560 MB with either backend on macOS arm64 (run-to-run noise exceeds the difference); the slim build's saving is install size | `python eval_retrieval.py --memory` |
-| Profiler | 49 tests: every detection rule, header-only files, all-NaN columns, mixed types, unicode headers, 60-column frames, cp1252 and BOM files, other delimiters, decimal commas, parse-time sampling | `pytest tests/test_profiler.py` |
+| Profiler | 50 tests: every detection rule, text-date spans, header-only files, all-NaN columns, mixed types, unicode headers, 60-column frames, cp1252 and BOM files, other delimiters, decimal commas, parse-time sampling | `pytest tests/test_profiler.py` |
 | Privacy | the prompts `generate_plan` sends contain no category labels, raw dates or file name, and don't grow with rows or columns | `pytest tests/test_llm_agent.py` |
-| Agent guards | 77 tests: DataFrame rejection (nested too), AST safety scan, invented-column check, the response schema sent to each provider, truncation, refusal, no-credit and rate-limit handling against mocked APIs, cache keying, script building | `pytest tests/test_llm_agent.py` |
-| UI | 12 Streamlit `AppTest` tests: cold start, provider defaults and switching, upload, plan reset on a new file or target, shared-key cap (failed runs not counted), invented columns, cp1252, semicolon and header-only files | `pytest tests/test_app.py` |
+| Agent guards | 83 tests: DataFrame rejection (nested too), AST safety scan, invented-column check, the response schema sent to each provider, truncation, refusal, no-credit, rate-limit and overload handling against mocked APIs, provider and model defaults, cache keying, script building | `pytest tests/test_llm_agent.py` |
+| UI | 13 Streamlit `AppTest` tests: cold start, provider defaults and switching, the Gemini label, upload, plan reset on a new file or target, shared-key cap (failed runs not counted), invented columns, cp1252, semicolon and header-only files | `pytest tests/test_app.py` |
 
-The suite passes with the runtime set on Python 3.11, 3.13 and 3.14 (ONNX backend) and with `requirements-dev.txt` on Python 3.12. The app was also exercised in a real browser: upload, every tab, the target selector, plan rendering, and the error path of a live OpenAI request.
+The suite passes with the runtime set on Python 3.11, 3.13 and 3.14 (ONNX backend) and with `requirements-dev.txt` on Python 3.12. The app was also exercised in a real browser — locally and on Streamlit Cloud — covering upload, every tab, the target selector and plan rendering.
 
-Estimated cost per request with Claude Haiku 4.5 ($1/$5 per MTok): roughly half a cent — about 1,200–2,300 input tokens plus the generated code.
+**Live runs.** With Gemini 3.5 Flash, plans were generated for the sample CSV and for the 18-issue test frame, and every generated step was then executed on a copy of the data: all steps ran, and re-profiling showed 6/6 and 8/8 of the targeted issues resolved. That is two runs of a non-deterministic model, not a benchmark — read generated code before running it.
+
+Estimated cost per request with Claude Haiku 4.5 ($1/$5 per MTok): roughly half a cent — about 1,200–2,300 input tokens plus the generated code. Gemini's free tier costs nothing, within its rate limits.
 
 ---
 

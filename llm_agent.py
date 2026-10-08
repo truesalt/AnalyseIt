@@ -289,17 +289,22 @@ class LLMConfig:
         return key
 
 
-def default_config() -> LLMConfig:
-    """Provider from ANALYSEIT_LLM_PROVIDER, else whichever key is present
-    (Anthropic when both or neither are)."""
-    provider = os.getenv("ANALYSEIT_LLM_PROVIDER", "").strip().lower()
-    if provider not in DEFAULT_MODELS:
+def default_config(provider: str | None = None, model: str | None = None) -> LLMConfig:
+    """
+    The config to use when nothing more specific is given. Explicit arguments
+    win; otherwise the provider comes from ANALYSEIT_LLM_PROVIDER, else
+    whichever key is present (Anthropic when both or neither are). The model
+    comes from ANALYSEIT_LLM_MODEL, but only for that environment provider -
+    a Gemini model name must not follow a switch to Anthropic.
+    """
+    env_provider = os.getenv("ANALYSEIT_LLM_PROVIDER", "").strip().lower()
+    if env_provider not in DEFAULT_MODELS:
         only_openai = os.getenv("OPENAI_API_KEY") and not os.getenv("ANTHROPIC_API_KEY")
-        provider = "openai" if only_openai else "anthropic"
-    return LLMConfig(
-        provider=provider,  # type: ignore[arg-type]
-        model=os.getenv("ANALYSEIT_LLM_MODEL") or None,
-    )
+        env_provider = "openai" if only_openai else "anthropic"
+    provider = provider or env_provider
+    if not model and provider == env_provider:
+        model = os.getenv("ANALYSEIT_LLM_MODEL") or None
+    return LLMConfig(provider=provider, model=model)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -472,10 +477,25 @@ def _call_anthropic(system: str, user: str, config: LLMConfig) -> CodeSuggestion
     return parsed
 
 
+# OPENAI_BASE_URL points the OpenAI path at any OpenAI-compatible API - Gemini's
+# free tier, for one - so errors and labels name whichever service it is.
+_COMPATIBLE_SERVICES = {"api.openai.com": "OpenAI", "generativelanguage.googleapis.com": "Gemini"}
+
+
+def openai_service_name(base_url: Any = None) -> str:
+    """'OpenAI', 'Gemini', or the host of another OpenAI-compatible API."""
+    from urllib.parse import urlparse
+
+    url = str(base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1")
+    host = urlparse(url).hostname or ""
+    return _COMPATIBLE_SERVICES.get(host, host or "OpenAI")
+
+
 def _call_openai(system: str, user: str, config: LLMConfig) -> CodeSuggestion:
     import openai
 
     client = openai.OpenAI(api_key=config.resolve_key())
+    service = openai_service_name(client.base_url)
     try:
         completion = client.chat.completions.parse(
             model=config.model,
@@ -489,7 +509,7 @@ def _call_openai(system: str, user: str, config: LLMConfig) -> CodeSuggestion:
             **config.extra,
         )
     except openai.AuthenticationError as exc:
-        raise LLMError("OpenAI rejected the API key.") from exc
+        raise LLMError(f"{service} rejected the API key.") from exc
     except openai.RateLimitError as exc:
         # The same 429 means two different things: an account with no credit
         # (retrying never helps) or a real rate limit (retrying does).
@@ -497,28 +517,35 @@ def _call_openai(system: str, user: str, config: LLMConfig) -> CodeSuggestion:
             isinstance(exc.body, dict) and exc.body.get("type") == "insufficient_quota"
         ):
             raise LLMError(
-                "Your OpenAI account has no credits left. Add credits at "
-                "platform.openai.com/settings/organization/billing, then retry."
+                f"Your {service} account has no credits left. "
+                + ("Add credits at platform.openai.com/settings/organization/billing, then retry."
+                   if service == "OpenAI" else "Add credit or quota there, then retry.")
             ) from exc
-        raise LLMError("OpenAI rate limit hit. Wait a moment and retry.") from exc
+        raise LLMError(f"{service} rate limit or free-tier quota hit. Wait a minute and retry.") from exc
+    except openai.InternalServerError as exc:
+        # 5xx, after the SDK's own retries - e.g. Gemini's "high demand" 503.
+        raise LLMError(
+            f"{service} is overloaded or unavailable right now ({exc.status_code}). "
+            "Try again in a minute, or pick another model in the sidebar."
+        ) from exc
     except openai.APIStatusError as exc:
-        raise LLMError(f"OpenAI API error {exc.status_code}: {exc.message}") from exc
+        raise LLMError(f"{service} API error {exc.status_code}: {exc.message}") from exc
     except openai.APIConnectionError as exc:
-        raise LLMError("Could not reach the OpenAI API. Check connectivity.") from exc
+        raise LLMError(f"Could not reach the {service} API. Check connectivity.") from exc
     # parse() raises these itself, before the finish_reason could be inspected.
     except openai.LengthFinishReasonError as exc:
         raise LLMError("Response was truncated; raise max_tokens.") from exc
     except openai.ContentFilterFinishReasonError as exc:
-        raise LLMError("OpenAI's content filter blocked the response.") from exc
+        raise LLMError(f"{service}'s content filter blocked the response.") from exc
     except ValidationError as exc:
-        raise LLMError("OpenAI's response did not match the expected format. Retry.") from exc
+        raise LLMError(f"{service}'s response did not match the expected format. Retry.") from exc
 
     choice = completion.choices[0]
     if getattr(choice.message, "refusal", None):
-        raise LLMError(f"OpenAI refused the request: {choice.message.refusal}")
+        raise LLMError(f"{service} refused the request: {choice.message.refusal}")
     parsed = choice.message.parsed
     if parsed is None:
-        raise LLMError("OpenAI returned no parseable structured output.")
+        raise LLMError(f"{service} returned no parseable structured output.")
     return parsed
 
 
@@ -778,7 +805,7 @@ def _cli() -> int:
         print("raw rows included: 0")
         return 0
 
-    config = LLMConfig(provider=args.provider or default_config().provider, model=args.model)
+    config = default_config(args.provider, args.model)
     print(f"provider={config.provider} model={config.model}\n")
     try:
         plan = generate_plan(profile, annotated, config=config)

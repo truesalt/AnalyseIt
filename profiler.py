@@ -418,7 +418,33 @@ class DataProfiler:
             "numeric_needs_cleaning": clean_numeric > 0.9 and raw_numeric < clean_numeric,
             "looks_datetime": self._parse_ratio(sample, "datetime") > 0.9,
         }
+        if stats["looks_datetime"] and not stats["looks_numeric"]:
+            stats.update(self._text_datetime_span(sample))
         return stats
+
+    @staticmethod
+    def _text_datetime_span(sample: pd.Series) -> dict[str, Any]:
+        """
+        The range a text date column covers. Without it the model extracts date
+        parts blind - a year feature from data that all falls in one year is a
+        new constant column. Measured on the sample, so the span is approximate.
+        """
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                parsed = pd.to_datetime(sample.astype(str).str.strip(), errors="coerce", format="mixed")
+            parsed = parsed.dropna()
+            if parsed.empty:
+                return {}
+            return {
+                "datetime_min": _native(parsed.min()),
+                "datetime_max": _native(parsed.max()),
+                "datetime_span_days": _round((parsed.max() - parsed.min()).total_seconds() / 86400, 1),
+                "distinct_years": int(parsed.dt.year.nunique()),
+                "distinct_months": int(parsed.dt.to_period("M").nunique()),
+            }
+        except Exception:
+            return {}
 
     @staticmethod
     def _parse_ratio(sample: pd.Series, kind: str, strip_decoration: bool = False) -> float:
@@ -641,10 +667,16 @@ class DataProfiler:
                         dtype=st["dtype"], needs_cleaning=st.get("numeric_needs_cleaning"),
                         missing_placeholder_count=st.get("missing_placeholder_count"))
                 elif st.get("looks_datetime"):
-                    add(col, "datetime_stored_as_text", 65,
-                        f"'{name}' is stored as text but parses as a datetime.",
+                    detail = f"'{name}' is stored as text but parses as a datetime"
+                    if st.get("datetime_span_days") is not None:
+                        years = st["distinct_years"]
+                        detail += (f", spanning about {st['datetime_span_days']:g} days across "
+                                   f"{years} calendar year{'s' if years != 1 else ''} and "
+                                   f"{st['distinct_months']} month(s) - extract only parts that vary")
+                    add(col, "datetime_stored_as_text", 65, detail + ".",
                         "parsing datetime columns and extracting temporal features",
-                        dtype=st["dtype"])
+                        dtype=st["dtype"], datetime_span_days=st.get("datetime_span_days"),
+                        distinct_years=st.get("distinct_years"))
 
                 low, high = MIXED_NUMERIC_RANGE
                 numeric_share = st.get("numeric_fraction") or 0.0

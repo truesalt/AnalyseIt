@@ -142,6 +142,14 @@ def test_text_that_merely_parses_as_a_date_is_not_a_date(values):
     assert not stats["looks_datetime"]
 
 
+def test_text_dates_report_their_span_so_constant_parts_are_avoided(sample_df):
+    report = DataProfiler(sample_df).profile()
+    stats = report["columns"]["signup_date"]
+    assert stats["distinct_years"] == 1 and stats["distinct_months"] == 10
+    detail = next(i["detail"] for i in report["issues"] if i["column"] == "signup_date")
+    assert "1 calendar year" in detail and "extract only parts that vary" in detail
+
+
 @pytest.mark.parametrize("values", [
     ["2024-01-05", "2024-02-11", "2024-03-30"],
     ["1/5/23", "2/6/23", "12/1/23"],            # two-digit years are still dates

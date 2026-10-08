@@ -16,10 +16,13 @@ SAMPLE_CSV = REPO / "sample_messy.csv"
 
 @pytest.fixture(autouse=True)
 def _isolated_llm_state(monkeypatch):
-    """Dummy keys (so nothing can bill a real account) and an empty response cache."""
+    """Dummy keys (so nothing can bill a real account), none of the developer's
+    own .env settings, and an empty response cache."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setenv("ANALYSEIT_EMBED_BACKEND", "onnx")
+    for name in ("ANALYSEIT_LLM_PROVIDER", "ANALYSEIT_LLM_MODEL", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
     llm_agent._CACHE.clear()
     yield
     llm_agent._CACHE.clear()

@@ -179,6 +179,16 @@ def test_default_config_follows_the_environment(monkeypatch):
     assert default_config().provider == "anthropic"  # no key at all
 
 
+def test_environment_model_follows_its_provider_only(monkeypatch):
+    # The Gemini-through-OpenAI setup: only an OpenAI-style key plus a model name.
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    monkeypatch.setenv("ANALYSEIT_LLM_MODEL", "gemini-3.8-flash")
+    assert default_config().model == "gemini-3.8-flash"
+    assert default_config("openai").model == "gemini-3.8-flash"
+    assert default_config("anthropic").model == "claude-haiku-4-5"   # not the Gemini name
+    assert default_config("openai", "gpt-4.1-mini").model == "gpt-4.1-mini"  # explicit wins
+
+
 @pytest.mark.parametrize("model, expected", [
     ("claude-haiku-4-5", True),
     ("claude-haiku-4-5-20251001", True),
@@ -298,6 +308,28 @@ def test_openai_429_says_whether_to_add_credits_or_wait(monkeypatch, error, mess
         transport=httpx.MockTransport(lambda request: httpx.Response(429, json={"error": error})))))
     with pytest.raises(LLMError, match=message):
         llm_agent._call_openai("sys", "user", LLMConfig(provider="openai"))
+
+
+def test_overloaded_compatible_service_says_so_by_name(monkeypatch):
+    import openai
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
+    real = openai.OpenAI
+    monkeypatch.setattr(openai, "OpenAI", lambda **kw: real(**kw, max_retries=0, http_client=httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(
+            503, json={"error": {"code": 503, "message": "high demand", "status": "UNAVAILABLE"}})))))
+    with pytest.raises(LLMError, match="Gemini is overloaded"):
+        llm_agent._call_openai("sys", "user", LLMConfig(provider="openai", model="gemini-3.5-flash"))
+
+
+@pytest.mark.parametrize("url, name", [
+    (None, "OpenAI"),
+    ("https://api.openai.com/v1", "OpenAI"),
+    ("https://generativelanguage.googleapis.com/v1beta/openai/", "Gemini"),
+    ("https://api.groq.com/openai/v1", "api.groq.com"),
+])
+def test_openai_service_name(url, name):
+    assert llm_agent.openai_service_name(url) == name
 
 
 def test_openai_truncation_is_a_clean_error(openai_response):
