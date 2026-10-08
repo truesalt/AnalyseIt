@@ -322,6 +322,18 @@ def test_overloaded_compatible_service_says_so_by_name(monkeypatch):
         llm_agent._call_openai("sys", "user", LLMConfig(provider="openai", model="gemini-3.5-flash"))
 
 
+def test_gemini_bad_key_400_reads_as_a_rejected_key(monkeypatch):
+    import openai
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
+    real = openai.OpenAI
+    monkeypatch.setattr(openai, "OpenAI", lambda **kw: real(**kw, max_retries=0, http_client=httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(400, json={"error": {
+            "code": 400, "message": "Please pass a valid API key", "status": "INVALID_ARGUMENT"}})))))
+    with pytest.raises(LLMError, match="Gemini rejected the API key"):
+        llm_agent._call_openai("sys", "user", LLMConfig(provider="openai", model="gemini-3.5-flash"))
+
+
 @pytest.mark.parametrize("url, name", [
     (None, "OpenAI"),
     ("https://api.openai.com/v1", "OpenAI"),

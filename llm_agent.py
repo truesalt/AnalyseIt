@@ -529,6 +529,9 @@ def _call_openai(system: str, user: str, config: LLMConfig) -> CodeSuggestion:
             "Try again in a minute, or pick another model in the sidebar."
         ) from exc
     except openai.APIStatusError as exc:
+        # Gemini reports a bad key as a 400, not the usual 401.
+        if "api key" in str(exc.message).lower():
+            raise LLMError(f"{service} rejected the API key. Check it was copied in full.") from exc
         raise LLMError(f"{service} API error {exc.status_code}: {exc.message}") from exc
     except openai.APIConnectionError as exc:
         raise LLMError(f"Could not reach the {service} API. Check connectivity.") from exc
