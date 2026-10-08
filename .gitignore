@@ -18,6 +18,3 @@ Thumbs.db
 
 # Tests
 .pytest_cache/
-
-# Local preview config (machine-specific paths)
-.claude/launch.json
