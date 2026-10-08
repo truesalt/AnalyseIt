@@ -1,0 +1,18 @@
+# AnalyseIt - development requirements: the runtime set plus the test suite
+# and the sentence-transformers embedding backend.
+#
+#   pip install -r requirements-dev.txt
+#
+# sentence-transformers pulls in PyTorch (~2 GB). On a machine without a CUDA
+# GPU, install the CPU-only build first to skip the CUDA download:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# It is optional: without it the app and the tests use the ONNX backend, and
+# only `python eval_retrieval.py --compare/--memory` needs it.
+
+-r requirements.txt
+
+sentence-transformers==6.1.0
+
+pytest==9.1.1
+httpx==0.28.1                     # tests mock the OpenAI SDK's HTTP layer
+httpx2==2.13.1                    # ...and the Anthropic SDK's

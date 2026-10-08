@@ -17,8 +17,16 @@
       ]
     }
   },
-  "updateContentCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; [ -f requirements.txt ] && pip3 install --user -r requirements.txt; pip3 install --user streamlit; echo '✅ Packages installed and Requirements met'",
+  // The runtime set (ONNX backend, no PyTorch) plus pytest: the suite runs on
+  // ONNX, and requirements-dev.txt would add ~2 GB of PyTorch for no
+  // difference in results.
+  "updateContentCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; pip3 install --user -r requirements.txt pytest==9.1.1; echo '✅ Packages installed and Requirements met'",
   "postAttachCommand": {
+    // Dev container only. Codespaces serves the app through its own proxy
+    // (*.app.github.dev), where Streamlit's XSRF cookie check rejects uploads
+    // with a 403, so it is switched off here. The forwarded port is private
+    // to you by default - keep it that way. Real deployments read
+    // .streamlit/config.toml, which keeps XSRF protection on.
     "server": "streamlit run app.py --server.enableCORS false --server.enableXsrfProtection false"
   },
   "portsAttributes": {

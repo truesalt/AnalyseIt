@@ -2,7 +2,8 @@
 # Machine Learning data preparation best practices.
 # Each "## " heading starts a new retrievable section. rag_engine.py chunks on
 # these boundaries, so every section should stand on its own without context
-# from its neighbours.
+# from its neighbours. Lines above the first "## " heading (like these) are
+# skipped; inside a section nothing is, and "### " sub-headings stay as text.
 
 
 ## Handling missing values in numeric columns
@@ -90,6 +91,15 @@ A numeric column stored with object dtype is one of the most common defects in r
 The consequences are severe and often silent: aggregations concatenate strings instead of summing, sorting is lexicographic so "10" precedes "9", correlation and describe silently skip the column, and models either error out or treat thousands of numeric values as categorical levels.
 
 Clean with pd.to_numeric(df[col], errors="coerce"), which converts the parseable values and turns everything else into NaN. Strip contaminating characters first using df[col].astype(str).str.replace(r"[^0-9.\-]", "", regex=True). Always inspect how many values became NaN after coercion: a small count means you removed genuine junk, whereas a large count means the column was not really numeric and your regex destroyed real data. After conversion, apply the missing value strategy appropriate to the resulting NaN count.
+
+
+## Placeholder codes and infinite values in numeric columns
+
+Legacy systems and survey instruments often record a missing measurement as a numeric code such as -1, -99, -999 or 99999 instead of leaving the cell empty. To pandas these are ordinary numbers, so they pass every dtype check while quietly corrupting every statistic. A few -999 entries in an age column drag the mean down, inflate the standard deviation, manufacture extreme skew and show up as a block of outliers. Clipping or transforming them treats a missing value as a real measurement, which is the wrong fix.
+
+A placeholder has three signatures: it is a round number repeated many times, it sits far outside the range of the genuine values, and it occurs far more often than any real extreme would. Confirm it against the data dictionary where one exists, then convert it to a true missing value with df[col] = df[col].replace([-999, 99999], np.nan) and apply the imputation strategy that suits the resulting missing percentage. Do this before outlier treatment, skew transforms or scaling, because each of those learns from the distribution the placeholder distorts.
+
+Infinite values come from division by zero, the log of zero, or overflow in an upstream feature calculation. Most estimators reject them outright, and scikit-learn raises an error for any input containing infinity. Replace them with df[col] = df[col].replace([np.inf, -np.inf], np.nan), impute as for any other missing value, and fix the calculation that produced them so new data does not reintroduce them.
 
 
 ## Parsing datetime columns and extracting features

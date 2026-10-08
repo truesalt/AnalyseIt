@@ -1,29 +1,33 @@
-# AnalyseIt - Doc-Augmented Automated EDA & Feature Engineering Agent
-# Python 3.10+ (tested on 3.12.3)
+# AnalyseIt - runtime requirements. Python 3.11+.
 #
-# LOCAL DEVELOPMENT. Install:  pip install -r requirements.txt
-# For deployment use requirements-deploy.txt, which drops torch and
-# sentence-transformers (~2 GB smaller) and runs the identical model via ONNX.
+# This is what Streamlit Community Cloud installs (it only ever reads a file
+# named requirements.txt), and all you need to run the app locally. It has no
+# PyTorch: ChromaDB bundles the all-MiniLM-L6-v2 model as ONNX, and
+# rag_engine.py picks that backend automatically. Its vectors match the
+# sentence-transformers backend to within ~2e-7 and give identical retrieval
+# rankings (`python eval_retrieval.py --compare`).
 #
-# On a machine without a CUDA GPU, install the CPU-only torch build first to
-# avoid a ~2.5 GB CUDA download:
-#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# For the test suite and the sentence-transformers backend:
+#   pip install -r requirements-dev.txt
+#
+# Exact pins: the set the test suite and eval_retrieval.py pass on. Upgrade
+# deliberately - bump a pin, re-run `pytest` and `python eval_retrieval.py`.
+# numpy and scipy are the newest releases that still support Python 3.11.
 
 # --- Frontend ---
-streamlit>=1.38.0
+streamlit==1.65.0
 
 # --- Data processing / statistical engine ---
-pandas>=2.2.0
-numpy>=1.26.0
-scipy>=1.13.0
-scikit-learn>=1.5.0
+pandas==3.0.6
+numpy==2.4.6
+scipy==1.17.1
+scikit-learn==1.9.1               # used by the generated cleaning code
 
 # --- Vector database + embeddings (RAG) ---
-chromadb>=0.5.5
-sentence-transformers>=3.0.0      # pulls in torch + transformers (~2 GB on first install)
+chromadb==1.5.9                   # brings onnxruntime + the ONNX MiniLM model
 
 # --- LLM + strictly typed outputs ---
-pydantic>=2.8.0
-openai>=1.40.0                    # gpt-4o-mini path
-anthropic>=0.40.0                 # Claude path
-python-dotenv>=1.0.1              # loads OPENAI_API_KEY / ANTHROPIC_API_KEY from .env
+pydantic==2.13.5
+openai==3.26.0                    # gpt-4o-mini path (chat.completions.parse)
+anthropic==1.11.0                 # Claude path (messages.parse; 1.x needs Python 3.10+)
+python-dotenv==1.2.4              # loads OPENAI_API_KEY / ANTHROPIC_API_KEY from .env

@@ -4,10 +4,11 @@ rag_engine.py - AnalyseIt's knowledge base (vector DB indexing + retrieval).
 Indexes a text file of ML best practices into a local, persistent ChromaDB
 collection and retrieves the passages relevant to a data-quality issue.
 
-Embedding backends (both produce identical all-MiniLM-L6-v2 384-dim vectors):
+Embedding backends (the same all-MiniLM-L6-v2 384-dim model; vectors agree
+to within ~2e-7 per component, and retrieval rankings are identical):
     "sentence-transformers"  default; the reference implementation
     "onnx"                   ChromaDB's bundled ONNX runtime - same model,
-                             ~500 MB less RAM, for 1 GB deploy targets
+                             no PyTorch, for 1 GB deploy targets
 
 Select with the ANALYSEIT_EMBED_BACKEND environment variable, or pass
 backend= to the constructor.
@@ -28,8 +29,13 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import chromadb
+from chromadb.config import Settings
 
 MODEL_NAME = "all-MiniLM-L6-v2"
+# ChromaDB reports anonymous usage events to PostHog by default. No data goes
+# with them, but a tool that promises nothing leaves the process should not
+# phone home at all.
+_CHROMA_SETTINGS = Settings(anonymized_telemetry=False)
 COLLECTION_NAME = "ml_best_practices"
 DEFAULT_PERSIST_DIR = Path(__file__).resolve().parent / ".chroma"
 DEFAULT_DOCS_FILE = Path(__file__).resolve().parent / "data" / "ml_docs.txt"
@@ -38,6 +44,11 @@ DEFAULT_DOCS_FILE = Path(__file__).resolve().parent / "data" / "ml_docs.txt"
 TARGET_CHUNK_CHARS = 600
 MAX_CHUNK_CHARS = 900
 MIN_CHUNK_CHARS = 80
+
+# Retrieval: passages below this cosine similarity are dropped rather than
+# padded into the prompt. Calibrated by eval_retrieval.py: every expected
+# passage scores >= 0.54, loosely related ones 0.36-0.44, off-topic ~0.1.
+MIN_SIMILARITY = 0.45
 
 
 # ---------------------------------------------------------------------------
@@ -59,20 +70,25 @@ def chunk_document(text: str, source: str = "ml_docs.txt") -> list[dict[str, Any
     which measurably degrades retrieval - a chunk reading "Above 30 percent,
     imputation fabricates the majority of the column" is far easier to match
     when it still carries its "Handling missing values" heading.
-    """
-    # Drop comment lines and the leading title block.
-    body = "\n".join(
-        line for line in text.splitlines() if not line.startswith("#") or line.startswith("## ")
-    )
 
+    Everything before the first '## ' heading (title, comments) is skipped.
+    Inside a section nothing is dropped: '### ' sub-headings keep their text
+    as a sentence of their own, and other lines starting with '#' (a code
+    comment, say) are kept verbatim.
+    """
     sections: list[tuple[str, str]] = []
     current_title, buffer = None, []
-    for line in body.splitlines():
+    for line in text.splitlines():
         if line.startswith("## "):
             if current_title and buffer:
                 sections.append((current_title, "\n".join(buffer).strip()))
             current_title, buffer = line[3:].strip(), []
-        elif current_title:
+        elif current_title is None:
+            continue  # preamble before the first section
+        elif line.startswith("###"):
+            heading = line.lstrip("#").strip()
+            buffer.append(heading if heading.endswith((".", "!", "?", ":")) else f"{heading}.")
+        else:
             buffer.append(line)
     if current_title and buffer:
         sections.append((current_title, "\n".join(buffer).strip()))
@@ -153,19 +169,16 @@ class _Embedder:
             return [[float(x) for x in v] for v in vectors]
         return [[float(x) for x in v] for v in impl(texts)]
 
-    @property
-    def dimension(self) -> int:
-        return len(self.embed(["dimension probe"])[0])
-
 
 def _resolve_backend(explicit: str | None) -> str:
     """
     Pick the embedding backend.
 
     Defaults to sentence-transformers, but falls back to ONNX when it is not
-    installed, so one requirements.txt works for both local dev and a slim
-    deploy. The fallback is safe: both backends produce byte-identical
-    all-MiniLM-L6-v2 vectors. An explicit choice is never overridden.
+    installed, so the same code serves local dev and a slim deploy. The
+    fallback is safe: both run all-MiniLM-L6-v2, their vectors agree to within
+    ~2e-7 per component, and retrieval rankings are identical (verified by
+    eval_retrieval.py). An explicit choice is never overridden.
     """
     backend = (explicit or os.getenv("ANALYSEIT_EMBED_BACKEND", "")).strip().lower()
     if backend:
@@ -195,7 +208,9 @@ class KnowledgeBase:
         self.model_name = model_name
         self.collection_name = collection_name
         self.in_memory = in_memory
-        self.persist_dir = Path(persist_dir or DEFAULT_PERSIST_DIR)
+        # One index per backend by default: sharing a directory, a process on
+        # the other backend would rebuild the collection under a running app.
+        self.persist_dir = Path(persist_dir) if persist_dir else DEFAULT_PERSIST_DIR / self.backend
         self._embedder = _Embedder(self.backend, model_name)
         self._client: Any = None
         self._collection: Any = None
@@ -205,10 +220,12 @@ class KnowledgeBase:
     def client(self) -> Any:
         if self._client is None:
             if self.in_memory:
-                self._client = chromadb.EphemeralClient()
+                self._client = chromadb.EphemeralClient(settings=_CHROMA_SETTINGS)
             else:
                 self.persist_dir.mkdir(parents=True, exist_ok=True)
-                self._client = chromadb.PersistentClient(path=str(self.persist_dir))
+                self._client = chromadb.PersistentClient(
+                    path=str(self.persist_dir), settings=_CHROMA_SETTINGS
+                )
         return self._client
 
     @property
@@ -327,9 +344,13 @@ class KnowledgeBase:
         )
 
     # -- retrieval ----------------------------------------------------------
-    def retrieve_context(self, query: str, top_k: int = 3) -> list[dict[str, Any]]:
+    def retrieve_context(
+        self, query: str, top_k: int = 3, min_similarity: float = MIN_SIMILARITY
+    ) -> list[dict[str, Any]]:
         """
-        Return the top_k most relevant passages for a query.
+        Return up to top_k passages for a query, dropping any whose cosine
+        similarity is below min_similarity - fewer passages, or none, beats
+        padding the prompt with unrelated text. Pass 0 to disable the cutoff.
 
         Each hit: {"text", "section", "similarity", "distance", "source"}.
         Returns [] when the index is empty rather than raising, so the UI can
@@ -337,12 +358,13 @@ class KnowledgeBase:
         """
         if not query or not query.strip():
             return []
-        if self.count() == 0:
+        count = self.count()
+        if count == 0:
             return []
 
         result = self.collection.query(
             query_embeddings=self._embedder.embed([query]),
-            n_results=min(top_k, self.count()),
+            n_results=min(top_k, count),
         )
 
         documents = (result.get("documents") or [[]])[0]
@@ -352,19 +374,25 @@ class KnowledgeBase:
         hits = []
         for doc, meta, dist in zip(documents, metadatas, distances):
             meta = meta or {}
+            similarity = 1.0 - float(dist)  # cosine space
+            if similarity < min_similarity:
+                continue
             hits.append(
                 {
                     "text": doc,
                     "section": meta.get("section", "unknown"),
                     "source": meta.get("source", "unknown"),
                     "distance": round(float(dist), 4),
-                    "similarity": round(1.0 - float(dist), 4),  # cosine space
+                    "similarity": round(similarity, 4),
                 }
             )
         return hits
 
     def retrieve_for_issues(
-        self, issues: list[dict[str, Any]], top_k: int = 3
+        self,
+        issues: list[dict[str, Any]],
+        top_k: int = 3,
+        min_similarity: float = MIN_SIMILARITY,
     ) -> list[dict[str, Any]]:
         """
         Retrieve context for profiler issues, using each issue's `rag_query`.
@@ -375,20 +403,9 @@ class KnowledgeBase:
         annotated = []
         for issue in issues:
             query = issue.get("rag_query") or issue.get("issue_type", "")
-            annotated.append({**issue, "retrieved_context": self.retrieve_context(query, top_k)})
+            hits = self.retrieve_context(query, top_k, min_similarity=min_similarity)
+            annotated.append({**issue, "retrieved_context": hits})
         return annotated
-
-    @staticmethod
-    def format_context(hits: list[dict[str, Any]], max_chars: int = 4000) -> str:
-        """Flatten retrieved passages into the text block injected into the LLM prompt."""
-        blocks, total = [], 0
-        for i, hit in enumerate(hits, start=1):
-            block = f"[Source {i} | {hit['section']}]\n{hit['text']}"
-            if total + len(block) > max_chars:
-                break
-            blocks.append(block)
-            total += len(block)
-        return "\n\n".join(blocks)
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +427,8 @@ def _cli() -> int:
                         help="embedding backend (default: $ANALYSEIT_EMBED_BACKEND or sentence-transformers)")
     parser.add_argument("--docs", default=str(DEFAULT_DOCS_FILE), help="path to ml_docs.txt")
     parser.add_argument("--top-k", type=int, default=3)
+    parser.add_argument("--min-similarity", type=float, default=MIN_SIMILARITY,
+                        help=f"drop passages below this cosine similarity (default {MIN_SIMILARITY})")
     args = parser.parse_args()
 
     kb = KnowledgeBase(backend=args.backend)
@@ -421,7 +440,7 @@ def _cli() -> int:
         print(json.dumps(info, indent=2))
 
     if args.query:
-        hits = kb.retrieve_context(args.query, top_k=args.top_k)
+        hits = kb.retrieve_context(args.query, top_k=args.top_k, min_similarity=args.min_similarity)
         print(f"\nQuery: {args.query!r}  ->  {len(hits)} hits\n" + "=" * 78)
         for i, hit in enumerate(hits, start=1):
             preview = hit["text"].replace("\n", " ")
